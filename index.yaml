@@ -3,14 +3,14 @@ entries:
   aws-cloud-controller-manager:
   - apiVersion: v1
     appVersion: v1.23.0-alpha.0
-    created: "2022-07-18T12:46:52.822238087Z"
+    created: "2022-12-09T10:16:00.114126843Z"
     description: Installs Cloud Controller Manager for AWS Cloud Provider
-    digest: 85da48dfe2f50f2ec0d261e2490b4dd36004210b775475c8767fdcbbcd6f455b
+    digest: 2113602a10bb5beb34915a777edeb0e8f3336fddd8838a8553c1c906845c29d3
     maintainers:
     - email: nic@amazon.com
       name: Nick Turner
     name: aws-cloud-controller-manager
     urls:
-    - https://github.com/Superbasil3/cloud-provider-aws/releases/download/helm-chart-aws-cloud-controller-manager-0.0.6/aws-cloud-controller-manager-0.0.6.tgz
-    version: 0.0.6
-generated: "2022-07-18T12:46:52.388812814Z"
+    - https://github.com/Superbasil3/cloud-provider-aws/releases/download/helm-chart-aws-cloud-controller-manager-0.0.7/aws-cloud-controller-manager-0.0.7.tgz
+    version: 0.0.7
+generated: "2022-12-09T10:15:59.825032221Z"
