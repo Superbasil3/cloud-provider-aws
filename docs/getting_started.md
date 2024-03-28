@@ -30,7 +30,7 @@ with the cloud controller manager.  The steps are as follows:
    between clusters, and should not be destroyed if the cluster is destroyed)
    to your instances.
 1. Apply the kustomize configuration: `kubectl apply -k
-   'github.com/kubernetes/cloud-provider-aws/manifests/base/?ref=master'` or
+   'github.com/kubernetes/cloud-provider-aws/examples/existing-cluster/base/?ref=master'` or
    run the cloud cloud controller manager in some alternative way.
 
 ### Using Leader Migration
@@ -56,4 +56,4 @@ In order to create a cluster using kops, you can try the kops example cluster. R
 
 `make kops-example`
 
-This will create a sample kops cluster with the example configuration, found in [examples/kops-new-cluster](examples/kops-new-cluster)  The cloud cloud controller manager specific configuration is separate, purely for readability purposes, and can be found in [overlays/cloud-controller-manager](examples/kops-new-cluster/overlays/cloud-controller-manager).
+This will create a sample kops cluster with the example configuration, found in [examples/kops-new-cluster](../examples/kops-new-cluster)  The cloud cloud controller manager specific configuration is separate, purely for readability purposes, and can be found in [overlays/cloud-controller-manager](../examples/kops-new-cluster/overlays/cloud-controller-manager).

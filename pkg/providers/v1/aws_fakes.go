@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -47,12 +48,14 @@ type FakeAWSServices struct {
 	asg      *FakeASG
 	metadata *FakeMetadata
 	kms      *FakeKMS
+
+	callCounts map[string]int
 }
 
 // NewFakeAWSServices creates a new FakeAWSServices
 func NewFakeAWSServices(clusterID string) *FakeAWSServices {
 	s := &FakeAWSServices{}
-	s.region = "us-east-1"
+	s.region = "us-west-2"
 	s.ec2 = &FakeEC2Impl{aws: s}
 	s.elb = &FakeELB{aws: s}
 	s.elbv2 = &FakeELBV2{aws: s}
@@ -66,7 +69,7 @@ func NewFakeAWSServices(clusterID string) *FakeAWSServices {
 	selfInstance := &ec2.Instance{}
 	selfInstance.InstanceId = aws.String("i-self")
 	selfInstance.Placement = &ec2.Placement{
-		AvailabilityZone: aws.String("us-east-1a"),
+		AvailabilityZone: aws.String("us-west-2a"),
 	}
 	selfInstance.PrivateDnsName = aws.String("ip-172-20-0-100.ec2.internal")
 	selfInstance.PrivateIpAddress = aws.String("192.168.0.1")
@@ -79,6 +82,8 @@ func NewFakeAWSServices(clusterID string) *FakeAWSServices {
 	tag.Value = aws.String(clusterID)
 	selfInstance.Tags = []*ec2.Tag{&tag}
 
+	s.callCounts = make(map[string]int)
+
 	return s
 }
 
@@ -89,6 +94,21 @@ func (s *FakeAWSServices) WithAz(az string) *FakeAWSServices {
 	}
 	s.selfInstance.Placement.AvailabilityZone = aws.String(az)
 	return s
+}
+
+// WithRegion sets the AWS region
+func (s *FakeAWSServices) WithRegion(region string) *FakeAWSServices {
+	s.region = region
+	return s
+}
+
+// countCall increments the counter for the given service, api, and resourceID and returns the resulting call count
+func (s *FakeAWSServices) countCall(service string, api string, resourceID string) int {
+	key := fmt.Sprintf("%s:%s:%s", service, api, resourceID)
+	s.callCounts[key]++
+	count := s.callCounts[key]
+	klog.Warningf("call count: %s:%d", key, count)
+	return count
 }
 
 // Compute returns a fake EC2 client
@@ -264,15 +284,59 @@ func (ec2i *FakeEC2Impl) RemoveSubnets() {
 	ec2i.Subnets = ec2i.Subnets[:0]
 }
 
+// DescribeAvailabilityZones returns fake availability zones
+// For every input returns a hardcoded list of fake availability zones for the moment
+func (ec2i *FakeEC2Impl) DescribeAvailabilityZones(request *ec2.DescribeAvailabilityZonesInput) ([]*ec2.AvailabilityZone, error) {
+	return []*ec2.AvailabilityZone{
+		{
+			ZoneName: aws.String("us-west-2a"),
+			ZoneType: aws.String("availability-zone"),
+			ZoneId:   aws.String("az1"),
+		},
+		{
+			ZoneName: aws.String("us-west-2b"),
+			ZoneType: aws.String("availability-zone"),
+			ZoneId:   aws.String("az2"),
+		},
+		{
+			ZoneName: aws.String("us-west-2c"),
+			ZoneType: aws.String("availability-zone"),
+			ZoneId:   aws.String("az3"),
+		},
+		{
+			ZoneName: aws.String("az-local"),
+			ZoneType: aws.String("local-zone"),
+			ZoneId:   aws.String("lz1"),
+		},
+		{
+			ZoneName: aws.String("az-wavelength"),
+			ZoneType: aws.String("wavelength"),
+			ZoneId:   aws.String("wl1"),
+		},
+	}, nil
+}
+
 // CreateTags is a mock for CreateTags from EC2
 func (ec2i *FakeEC2Impl) CreateTags(input *ec2.CreateTagsInput) (*ec2.CreateTagsOutput, error) {
 	for _, id := range input.Resources {
+		callCount := ec2i.aws.countCall("ec2", "CreateTags", *id)
 		if *id == "i-error" {
 			return nil, errors.New("Unable to tag")
 		}
 
 		if *id == "i-not-found" {
 			return nil, awserr.New("InvalidInstanceID.NotFound", "Instance not found", nil)
+		}
+		// return an Instance not found error for the first `n` calls
+		// instance ID should be of the format `i-not-found-count-$N-$SUFFIX`
+		if strings.HasPrefix(*id, "i-not-found-count-") {
+			notFoundCount, err := strconv.Atoi(strings.Split(*id, "-")[4])
+			if err != nil {
+				panic(err)
+			}
+			if callCount < notFoundCount {
+				return nil, awserr.New("InvalidInstanceID.NotFound", "Instance not found", nil)
+			}
 		}
 	}
 	return &ec2.CreateTagsOutput{}, nil
@@ -402,6 +466,11 @@ func (m *FakeMetadata) GetMetadata(key string) (string, error) {
 	}
 
 	return "", nil
+}
+
+// Region returns AWS region
+func (m *FakeMetadata) Region() (string, error) {
+	return m.aws.region, nil
 }
 
 // FakeELB is a fake ELB client used for testing
@@ -725,8 +794,16 @@ func (ec2i *FakeEC2Impl) DescribeNetworkInterfaces(input *ec2.DescribeNetworkInt
 			return &ec2.DescribeNetworkInterfacesOutput{}, nil
 		}
 
-		if *filter.Values[0] == "return.private.dns.name" {
+		if strings.Contains(*filter.Values[0], "return.private.dns.name") {
 			networkInterface[0].PrivateDnsName = aws.String("ip-1-2-3-4.compute.amazon.com")
+		}
+
+		if *filter.Values[0] == "return.private.dns.name.ipv6" {
+			networkInterface[0].Ipv6Addresses = []*ec2.NetworkInterfaceIpv6Address{
+				{
+					Ipv6Address: aws.String("2001:db8:3333:4444:5555:6666:7777:8888"),
+				},
+			}
 		}
 	}
 

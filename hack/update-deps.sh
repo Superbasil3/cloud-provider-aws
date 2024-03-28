@@ -1,6 +1,6 @@
-#!/bin/bash -xe
+#!/usr/bin/env bash
 
-# Copyright 2022 The Kubernetes Authors.
+# Copyright 2023 The Kubernetes Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,19 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-VERSION=$(cat version.txt)
+set -o errexit
+set -o pipefail
 
-if [[ ! "${VERSION}" =~ ^([0-9]+[.][0-9]+)[.]([0-9]+)(-(alpha|beta|rc)[.]([0-9]+))?$ ]]; then
-  echo "Version ${VERSION} must be 'X.Y.Z', 'X.Y.Z-alpha.N', 'X.Y.Z-beta.N' or 'X.Y.Z-rc.N'"
-  exit 1
-fi
-
-if [ "$(git tag -l "v${VERSION}")" ]; then
-  echo "Tag v${VERSION} already exists"
-  exit 1
-fi
-
-git tag -a -m "Release ${VERSION}" "v${VERSION}"
-git push origin "v${VERSION}"
-
-echo "release_tag=refs/tags/v${VERSION}" >> $GITHUB_OUTPUT
+go get $( go list -f '{{if not (or .Main .Indirect)}}{{.Path}}{{end}}' -mod=mod -m all)
+go mod tidy
+$(cd tests/e2e && go mod tidy)

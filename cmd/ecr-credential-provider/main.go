@@ -30,26 +30,43 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ecr"
+	"github.com/aws/aws-sdk-go/service/ecrpublic"
+	"github.com/spf13/cobra"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/component-base/logs"
 	"k8s.io/klog/v2"
-	"k8s.io/kubelet/pkg/apis/credentialprovider/v1alpha1"
+	v1 "k8s.io/kubelet/pkg/apis/credentialprovider/v1"
 )
 
-var ecrPattern = regexp.MustCompile(`^(\d{12})\.dkr\.ecr(\-fips)?\.([a-zA-Z0-9][a-zA-Z0-9-_]*)\.(amazonaws\.com(\.cn)?|sc2s\.sgov\.gov|c2s\.ic\.gov)$`)
+const ecrPublicRegion string = "us-east-1"
+const ecrPublicHost string = "public.ecr.aws"
+
+var ecrPrivateHostPattern = regexp.MustCompile(`^(\d{12})\.dkr\.ecr(\-fips)?\.([a-zA-Z0-9][a-zA-Z0-9-_]*)\.(amazonaws\.com(\.cn)?|sc2s\.sgov\.gov|c2s\.ic\.gov)$`)
 
 // ECR abstracts the calls we make to aws-sdk for testing purposes
 type ECR interface {
 	GetAuthorizationToken(input *ecr.GetAuthorizationTokenInput) (*ecr.GetAuthorizationTokenOutput, error)
 }
 
-type ecrPlugin struct {
-	ecr ECR
+// ECRPublic abstracts the calls we make to aws-sdk for testing purposes
+type ECRPublic interface {
+	GetAuthorizationToken(input *ecrpublic.GetAuthorizationTokenInput) (*ecrpublic.GetAuthorizationTokenOutput, error)
 }
 
-func defaultECRProvider(region string, registryID string) (*ecr.ECR, error) {
+type ecrPlugin struct {
+	ecr       ECR
+	ecrPublic ECRPublic
+}
+
+func defaultECRProvider(region string) (*ecr.ECR, error) {
+	cfg := aws.Config{}
+	if region != "" {
+		klog.Warningf("No region found in the image reference, the default region will be used. Please refer to AWS SDK documentation for configuration purpose.")
+		cfg.Region = aws.String(region)
+	}
 	sess, err := session.NewSessionWithOptions(session.Options{
-		Config:            aws.Config{Region: aws.String(region)},
+		Config:            cfg,
 		SharedConfigState: session.SharedConfigEnable,
 	})
 	if err != nil {
@@ -59,22 +76,37 @@ func defaultECRProvider(region string, registryID string) (*ecr.ECR, error) {
 	return ecr.New(sess), nil
 }
 
-func (e *ecrPlugin) GetCredentials(ctx context.Context, image string, args []string) (*v1alpha1.CredentialProviderResponse, error) {
-	registryID, region, registry, err := parseRepoURL(image)
+func publicECRProvider() (*ecrpublic.ECRPublic, error) {
+	// ECR public registries are only in one region and only accessible from regions
+	// in the "aws" partition.
+	sess, err := session.NewSessionWithOptions(session.Options{
+		Config:            aws.Config{Region: aws.String(ecrPublicRegion)},
+		SharedConfigState: session.SharedConfigEnable,
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	if e.ecr == nil {
-		e.ecr, err = defaultECRProvider(region, registryID)
-		if err != nil {
-			return nil, err
-		}
+	return ecrpublic.New(sess), nil
+}
+
+type credsData struct {
+	authToken *string
+	expiresAt *time.Time
+}
+
+func (e *ecrPlugin) getPublicCredsData() (*credsData, error) {
+	klog.Infof("Getting creds for public registry")
+	var err error
+
+	if e.ecrPublic == nil {
+		e.ecrPublic, err = publicECRProvider()
+	}
+	if err != nil {
+		return nil, err
 	}
 
-	output, err := e.ecr.GetAuthorizationToken(&ecr.GetAuthorizationTokenInput{
-		RegistryIds: []*string{aws.String(registryID)},
-	})
+	output, err := e.ecrPublic.GetAuthorizationToken(&ecrpublic.GetAuthorizationTokenInput{})
 	if err != nil {
 		return nil, err
 	}
@@ -83,16 +115,67 @@ func (e *ecrPlugin) GetCredentials(ctx context.Context, image string, args []str
 		return nil, errors.New("response output from ECR was nil")
 	}
 
-	if len(output.AuthorizationData) == 0 {
+	if output.AuthorizationData == nil {
 		return nil, errors.New("authorization data was empty")
 	}
 
-	data := output.AuthorizationData[0]
-	if data.AuthorizationToken == nil {
+	return &credsData{
+		authToken: output.AuthorizationData.AuthorizationToken,
+		expiresAt: output.AuthorizationData.ExpiresAt,
+	}, nil
+}
+
+func (e *ecrPlugin) getPrivateCredsData(imageHost string, image string) (*credsData, error) {
+	klog.Infof("Getting creds for private image %s", image)
+	var err error
+
+	if e.ecr == nil {
+		region := parseRegionFromECRPrivateHost(imageHost)
+		e.ecr, err = defaultECRProvider(region)
+		if err != nil {
+			return nil, err
+		}
+	}
+	output, err := e.ecr.GetAuthorizationToken(&ecr.GetAuthorizationTokenInput{})
+	if err != nil {
+		return nil, err
+	}
+	if output == nil {
+		return nil, errors.New("response output from ECR was nil")
+	}
+	if len(output.AuthorizationData) == 0 {
+		return nil, errors.New("authorization data was empty")
+	}
+	return &credsData{
+		authToken: output.AuthorizationData[0].AuthorizationToken,
+		expiresAt: output.AuthorizationData[0].ExpiresAt,
+	}, nil
+}
+
+func (e *ecrPlugin) GetCredentials(ctx context.Context, image string, args []string) (*v1.CredentialProviderResponse, error) {
+	var creds *credsData
+	var err error
+
+	imageHost, err := parseHostFromImageReference(image)
+	if err != nil {
+		return nil, err
+	}
+
+	if imageHost == ecrPublicHost {
+		creds, err = e.getPublicCredsData()
+	} else {
+		creds, err = e.getPrivateCredsData(imageHost, image)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	if creds.authToken == nil {
 		return nil, errors.New("authorization token in response was nil")
 	}
 
-	decodedToken, err := base64.StdEncoding.DecodeString(aws.StringValue(data.AuthorizationToken))
+	decodedToken, err := base64.StdEncoding.DecodeString(aws.StringValue(creds.authToken))
 	if err != nil {
 		return nil, err
 	}
@@ -102,13 +185,13 @@ func (e *ecrPlugin) GetCredentials(ctx context.Context, image string, args []str
 		return nil, errors.New("error parsing username and password from authorization token")
 	}
 
-	cacheDuration := getCacheDuration(data.ExpiresAt)
+	cacheDuration := getCacheDuration(creds.expiresAt)
 
-	return &v1alpha1.CredentialProviderResponse{
-		CacheKeyType:  v1alpha1.RegistryPluginCacheKeyType,
+	return &v1.CredentialProviderResponse{
+		CacheKeyType:  v1.RegistryPluginCacheKeyType,
 		CacheDuration: cacheDuration,
-		Auth: map[string]v1alpha1.AuthConfig{
-			registry: {
+		Auth: map[string]v1.AuthConfig{
+			imageHost: {
 				Username: parts[0],
 				Password: parts[1],
 			},
@@ -135,30 +218,50 @@ func getCacheDuration(expiresAt *time.Time) *metav1.Duration {
 	return cacheDuration
 }
 
-// parseRepoURL parses and splits the registry URL
-// returns (registryID, region, registry).
-// <registryID>.dkr.ecr(-fips).<region>.amazonaws.com(.cn)
-func parseRepoURL(image string) (string, string, string, error) {
-	if !strings.Contains(image, "https://") {
+// parseHostFromImageReference parses the hostname from an image reference
+func parseHostFromImageReference(image string) (string, error) {
+	// a URL needs a scheme to be parsed correctly
+	if !strings.Contains(image, "://") {
 		image = "https://" + image
 	}
 	parsed, err := url.Parse(image)
 	if err != nil {
-		return "", "", "", fmt.Errorf("error parsing image %s: %v", image, err)
+		return "", fmt.Errorf("error parsing image reference %s: %v", image, err)
 	}
+	return parsed.Hostname(), nil
+}
 
-	splitURL := ecrPattern.FindStringSubmatch(parsed.Hostname())
-	if len(splitURL) < 4 {
-		return "", "", "", fmt.Errorf("%s is not a valid ECR repository URL", parsed.Hostname())
+func parseRegionFromECRPrivateHost(host string) string {
+	splitHost := ecrPrivateHostPattern.FindStringSubmatch(host)
+	if len(splitHost) != 6 {
+		return ""
 	}
-
-	return splitURL[1], splitURL[3], parsed.Hostname(), nil
+	return splitHost[3]
 }
 
 func main() {
-	p := NewCredentialProvider(&ecrPlugin{})
-	if err := p.Run(context.TODO()); err != nil {
-		klog.Errorf("Error running credential provider plugin: %v", err)
+	logs.InitLogs()
+	defer logs.FlushLogs()
+
+	if err := newCredentialProviderCommand().Execute(); err != nil {
 		os.Exit(1)
 	}
+}
+
+var gitVersion string
+
+func newCredentialProviderCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "ecr-credential-provider",
+		Short:   "ECR credential provider for kubelet",
+		Version: gitVersion,
+		Run: func(cmd *cobra.Command, args []string) {
+			p := NewCredentialProvider(&ecrPlugin{})
+			if err := p.Run(context.TODO()); err != nil {
+				klog.Errorf("Error running credential provider plugin: %v", err)
+				os.Exit(1)
+			}
+		},
+	}
+	return cmd
 }

@@ -1,21 +1,27 @@
 approvers:
+- dims
 - justinsb
 - nckturner
 - M00nF1sh
 - andrewsykim
 - wongma7
-- jaypipes
 - olemarkus
 - hakman
+- kishorj
+- cartermckinnon
+- mmerkes
 reviewers:
+- dims
 - justinsb
 - nckturner
 - M00nF1sh
 - andrewsykim
 - wongma7
-- jaypipes
 - olemarkus
 - hakman
+- kishorj
+- cartermckinnon
+- mmerkes
 emeritus_approvers:
 - zmerlynn
 - gnufied
@@ -26,3 +32,4 @@ emeritus_approvers:
 - d-nishi
 - leakingtapan
 - ayberk
+- jaypipes
